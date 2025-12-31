@@ -1,7 +1,8 @@
 import gradio as gr
 import numpy as np
 import librosa
-from audiosr import super_resolution, super_resolution_batch, build_model
+from audiosr import super_resolution, build_model
+from audiosr.pipeline import super_resolution_from_waveform
 import tempfile
 import soundfile as sf
 import os
@@ -49,45 +50,40 @@ def normalize_chunk_amplitude(processed_chunk, original_chunk):
     
     return processed_chunk * scale_factor
 
-def process_chunks_batch(audiosr, chunks, original_lengths, sr, guidance_scale, ddim_steps):
+def process_chunk_direct(audiosr, chunk, original_length, sr, guidance_scale, ddim_steps):
     """
-    Process multiple chunks in a single batch using GPU parallelization.
+    Process a single chunk directly without saving to file.
     
     Args:
         audiosr: The model
-        chunks: List of numpy arrays (audio chunks)
-        original_lengths: List of original lengths for each chunk
+        chunk: numpy array (audio chunk)
+        original_length: Original length of the chunk
         sr: Sample rate
         guidance_scale: Guidance scale
         ddim_steps: DDIM steps
         
     Returns:
-        List of processed chunks as numpy arrays
+        Processed chunk as numpy array
     """
     adjusted_ddim_steps = min(ddim_steps - 2, 998)
     
-    # Process all chunks in one batch
-    processed_chunks = super_resolution_batch(
+    # Process chunk directly (no file I/O)
+    processed = super_resolution_from_waveform(
         audiosr,
-        chunks,
+        chunk,
         guidance_scale=guidance_scale,
         ddim_steps=adjusted_ddim_steps
     )
     
-    # Post-process each chunk
-    results = []
-    for i, (processed, original, orig_len) in enumerate(zip(processed_chunks, chunks, original_lengths)):
-        # Normalize amplitude
-        result = normalize_chunk_amplitude(processed, original)
-        
-        # Trim to original length
-        result = np.squeeze(result)
-        if len(result) > orig_len:
-            result = result[:orig_len]
-        
-        results.append(result)
+    # Normalize amplitude
+    result = normalize_chunk_amplitude(processed, chunk)
     
-    return results
+    # Trim to original length
+    result = np.squeeze(result)
+    if len(result) > original_length:
+        result = result[:original_length]
+    
+    return result
 
 
 def process_chunk(audiosr, chunk, sr, guidance_scale, ddim_steps, is_last_chunk=False, target_length=None):
@@ -152,7 +148,7 @@ def process_chunk(audiosr, chunk, sr, guidance_scale, ddim_steps, is_last_chunk=
             print(f"Warning: Could not remove temporary file {temp_path}: {e}")
 
 def process_audio_channel(audiosr, audio_channel, sr, guidance_scale, ddim_steps, batch_size=1):
-    """Process a single audio channel with optional batch processing"""
+    """Process a single audio channel with grouped processing for memory efficiency"""
     # Calculate chunk parameters
     chunk_duration = 5.1  # seconds
     chunk_size = int(chunk_duration * sr)
@@ -164,7 +160,7 @@ def process_audio_channel(audiosr, audio_channel, sr, guidance_scale, ddim_steps
     num_chunks = int(np.ceil(total_samples / (chunk_size - overlap_size)))
     
     print(f"Total chunks to process: {num_chunks}")
-    print(f"Batch size: {batch_size}")
+    print(f"Processing group size: {batch_size}")
     
     # Collect all chunks first
     all_chunks = []
@@ -179,49 +175,36 @@ def process_audio_channel(audiosr, audio_channel, sr, guidance_scale, ddim_steps
         all_original_lengths.append(len(chunk))
         chunk_boundaries.append((start, end))
     
-    # Process chunks in batches
+    # Process chunks in groups (for memory management)
     processed_results = []
-    num_batches = int(np.ceil(num_chunks / batch_size))
+    num_groups = int(np.ceil(num_chunks / batch_size))
     
-    for batch_idx in range(num_batches):
-        batch_start = batch_idx * batch_size
-        batch_end = min(batch_start + batch_size, num_chunks)
+    for group_idx in range(num_groups):
+        group_start = group_idx * batch_size
+        group_end = min(group_start + batch_size, num_chunks)
         
-        batch_chunks = all_chunks[batch_start:batch_end]
-        batch_lengths = all_original_lengths[batch_start:batch_end]
+        print(f"\n{'='*60}")
+        print(f"Processing group {group_idx+1}/{num_groups} (chunks {group_start+1}-{group_end}/{num_chunks})")
+        print(f"{'='*60}")
         
-        print(f"\n{'='*50}")
-        print(f"Processing batch {batch_idx+1}/{num_batches} (chunks {batch_start+1}-{batch_end}/{num_chunks})")
-        print(f"{'='*50}")
-        
-        if batch_size > 1 and len(batch_chunks) > 1:
-            # Use batch processing
-            batch_results = process_chunks_batch(
-                audiosr, batch_chunks, batch_lengths, sr, guidance_scale, ddim_steps
+        # Process each chunk in the group
+        for j in range(group_start, group_end):
+            chunk = all_chunks[j]
+            orig_len = all_original_lengths[j]
+            start, end = chunk_boundaries[j]
+            
+            print(f"\n  Chunk {j+1}/{num_chunks}: {start/sr:.2f}s - {end/sr:.2f}s ({(end-start)/sr:.2f}s)")
+            
+            # Use direct waveform processing (no file I/O)
+            result = process_chunk_direct(
+                audiosr, chunk, orig_len, sr, guidance_scale, ddim_steps
             )
-            processed_results.extend(batch_results)
-        else:
-            # Process single chunk
-            for j, (chunk, orig_len) in enumerate(zip(batch_chunks, batch_lengths)):
-                chunk_idx = batch_start + j
-                start, end = chunk_boundaries[chunk_idx]
-                is_last = (chunk_idx == num_chunks - 1)
-                
-                print(f"\nProcessing chunk {chunk_idx+1}/{num_chunks}")
-                print(f"Chunk time range: {start/sr:.2f}s to {end/sr:.2f}s of total {total_samples/sr:.2f}s")
-                
-                if is_last:
-                    remaining_samples = total_samples - start
-                    result = process_chunk(audiosr, chunk, sr, guidance_scale, ddim_steps,
-                                         is_last_chunk=True, target_length=remaining_samples)
-                else:
-                    result = process_chunk(audiosr, chunk, sr, guidance_scale, ddim_steps,
-                                         is_last_chunk=False)
-                processed_results.append(result)
+            processed_results.append(result)
         
-        # Clear GPU cache after each batch
+        # Clear GPU cache after each group to free memory
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+            print(f"  [GPU memory cleared after group {group_idx+1}]")
     
     # Apply crossfade and concatenate
     processed_chunks = []
@@ -259,9 +242,8 @@ def process_audio_channel(audiosr, audio_channel, sr, guidance_scale, ddim_steps
             processed_chunk = processed_chunk[:, actual_overlap_size:]
         
         processed_chunks.append(processed_chunk)
-        print(f"Chunk {i+1} processed and crossfaded successfully")
     
-    print("\nConcatenating processed chunks...")
+    print(f"\nConcatenating {len(processed_chunks)} processed chunks...")
     return np.concatenate(processed_chunks, axis=1)
 
 def normalize_audio(audio):
@@ -343,12 +325,12 @@ iface = gr.Interface(
         gr.Dropdown(["basic", "speech"], value="basic", label="Model"),
         gr.Slider(1, 10, value=2.6, step=0.1, label="Guidance Scale"),  
         gr.Slider(1, 100, value=100, step=1, label="DDIM Steps"),
-        gr.Slider(1, 8, value=1, step=1, label="Batch Size", 
-                  info="同时处理多个音频块以加速处理。增大此值需要更多显存。RTX 5070 Ti (16GB) 建议 2-4")
+        gr.Slider(1, 16, value=4, step=1, label="Group Size", 
+                  info="每组处理的chunk数量，处理完一组后清理GPU显存。较大值=更少显存清理=略快；较小值=更频繁清理=更稳定")
     ],
     outputs=gr.Audio(type="numpy", label="Output Audio"),
     title="AudioSR - Audio Super Resolution",
-    description="音频超分辨率处理。支持批量处理以加速长音频处理。"
+    description="音频超分辨率处理。直接处理波形数据，无需临时文件I/O。"
 )
 
 # Create temp directory on startup

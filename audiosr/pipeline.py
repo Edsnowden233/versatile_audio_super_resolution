@@ -203,14 +203,31 @@ def super_resolution(
     return waveform
 
 
-def make_batch_for_super_resolution_from_waveform(waveform_np):
+def super_resolution_from_waveform(
+    latent_diffusion,
+    waveform_np,
+    seed=42,
+    ddim_steps=200,
+    guidance_scale=3.5,
+):
     """
-    Create a batch dict from a numpy waveform array.
-    waveform_np: numpy array of shape (samples,) at 48kHz
-    Returns: batch dict and duration
+    Process a single waveform directly without saving to file.
+    
+    Args:
+        latent_diffusion: The model
+        waveform_np: numpy array of shape (samples,) at 48kHz
+        seed: Random seed
+        ddim_steps: Number of DDIM steps
+        guidance_scale: Guidance scale for generation
+        
+    Returns:
+        Processed waveform as numpy array
     """
+    seed_everything(int(seed))
+    
     sampling_rate = 48000
-    duration = len(waveform_np) / sampling_rate
+    original_length = len(waveform_np)
+    duration = original_length / sampling_rate
     
     # Pad to multiple of 5.12s
     if duration % 5.12 != 0:
@@ -241,89 +258,29 @@ def make_batch_for_super_resolution_from_waveform(waveform_np):
     )
     batch["lowpass_mel"] = lowpass_mel
     
-    return batch, duration
-
-
-def super_resolution_batch(
-    latent_diffusion,
-    waveforms,
-    seed=42,
-    ddim_steps=200,
-    guidance_scale=3.5,
-):
-    """
-    Process multiple waveforms in a single batch for better GPU utilization.
+    # Add batch dimension to all tensors
+    for k in batch.keys():
+        if isinstance(batch[k], torch.Tensor):
+            batch[k] = torch.FloatTensor(batch[k]).unsqueeze(0)
     
-    Args:
-        latent_diffusion: The model
-        waveforms: List of numpy arrays, each of shape (samples,) at 48kHz
-        seed: Random seed
-        ddim_steps: Number of DDIM steps
-        guidance_scale: Guidance scale for generation
-        
-    Returns:
-        List of processed waveforms as numpy arrays
-    """
-    seed_everything(int(seed))
-    
-    if len(waveforms) == 0:
-        return []
-    
-    # Prepare batches for all waveforms
-    batches = []
-    durations = []
-    original_lengths = []
-    
-    for waveform in waveforms:
-        original_lengths.append(len(waveform))
-        batch, duration = make_batch_for_super_resolution_from_waveform(waveform)
-        batches.append(batch)
-        durations.append(duration)
-    
-    # Stack all batches into a single batch
-    # All keys in batch are tensors with shape (1, ...)
-    combined_batch = {}
-    for key in batches[0].keys():
-        if key == "sampling_rate":
-            combined_batch[key] = batches[0][key]
-        elif isinstance(batches[0][key], torch.Tensor):
-            # Stack along batch dimension
-            combined_batch[key] = torch.cat([b[key] for b in batches], dim=0)
-        else:
-            combined_batch[key] = batches[0][key]
-    
-    # Process all chunks at once
+    # Process
     with torch.no_grad():
-        # Use the max duration for generation
-        max_duration = max(durations)
         result = latent_diffusion.generate_batch(
-            combined_batch,
+            batch,
             unconditional_guidance_scale=guidance_scale,
             ddim_steps=ddim_steps,
-            duration=max_duration,
+            duration=pad_duration,
         )
     
-    # Split results back into individual waveforms
-    # result shape is (batch_size, 1, samples) or (batch_size, samples)
-    if isinstance(result, np.ndarray):
-        result = torch.from_numpy(result)
+    # Convert to numpy and trim to original length
+    if isinstance(result, torch.Tensor):
+        result = result.cpu().numpy()
     
-    result = result.squeeze()  # Remove singleton dimensions
+    result = np.squeeze(result)
+    if len(result) > original_length:
+        result = result[:original_length]
     
-    # If only one sample, add batch dimension back
-    if len(result.shape) == 1:
-        result = result.unsqueeze(0)
-    
-    # Convert to list of numpy arrays, trimmed to original lengths
-    processed_waveforms = []
-    for i, orig_len in enumerate(original_lengths):
-        waveform = result[i].cpu().numpy() if isinstance(result[i], torch.Tensor) else result[i]
-        # Trim to original length
-        if len(waveform) > orig_len:
-            waveform = waveform[:orig_len]
-        processed_waveforms.append(waveform)
-    
-    return processed_waveforms
+    return result
 
 
 def super_resolution_long_audio(
