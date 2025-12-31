@@ -203,6 +203,129 @@ def super_resolution(
     return waveform
 
 
+def make_batch_for_super_resolution_from_waveform(waveform_np):
+    """
+    Create a batch dict from a numpy waveform array.
+    waveform_np: numpy array of shape (samples,) at 48kHz
+    Returns: batch dict and duration
+    """
+    sampling_rate = 48000
+    duration = len(waveform_np) / sampling_rate
+    
+    # Pad to multiple of 5.12s
+    if duration % 5.12 != 0:
+        pad_duration = duration + (5.12 - duration % 5.12)
+    else:
+        pad_duration = duration
+    
+    target_frame = int(pad_duration * 100)
+    
+    # Normalize and pad
+    waveform = normalize_wav(waveform_np)
+    waveform = pad_wav(waveform, target_length=int(sampling_rate * pad_duration))
+    
+    # Extract features
+    log_mel_spec, stft = wav_feature_extraction(torch.from_numpy(waveform), target_frame)
+    
+    batch = {
+        "waveform": torch.FloatTensor(waveform),
+        "stft": torch.FloatTensor(stft),
+        "log_mel_spec": torch.FloatTensor(log_mel_spec),
+        "sampling_rate": sampling_rate,
+    }
+    
+    batch.update(lowpass_filtering_prepare_inference(batch))
+    
+    lowpass_mel, lowpass_stft = wav_feature_extraction(
+        batch["waveform_lowpass"], target_frame
+    )
+    batch["lowpass_mel"] = lowpass_mel
+    
+    return batch, duration
+
+
+def super_resolution_batch(
+    latent_diffusion,
+    waveforms,
+    seed=42,
+    ddim_steps=200,
+    guidance_scale=3.5,
+):
+    """
+    Process multiple waveforms in a single batch for better GPU utilization.
+    
+    Args:
+        latent_diffusion: The model
+        waveforms: List of numpy arrays, each of shape (samples,) at 48kHz
+        seed: Random seed
+        ddim_steps: Number of DDIM steps
+        guidance_scale: Guidance scale for generation
+        
+    Returns:
+        List of processed waveforms as numpy arrays
+    """
+    seed_everything(int(seed))
+    
+    if len(waveforms) == 0:
+        return []
+    
+    # Prepare batches for all waveforms
+    batches = []
+    durations = []
+    original_lengths = []
+    
+    for waveform in waveforms:
+        original_lengths.append(len(waveform))
+        batch, duration = make_batch_for_super_resolution_from_waveform(waveform)
+        batches.append(batch)
+        durations.append(duration)
+    
+    # Stack all batches into a single batch
+    # All keys in batch are tensors with shape (1, ...)
+    combined_batch = {}
+    for key in batches[0].keys():
+        if key == "sampling_rate":
+            combined_batch[key] = batches[0][key]
+        elif isinstance(batches[0][key], torch.Tensor):
+            # Stack along batch dimension
+            combined_batch[key] = torch.cat([b[key] for b in batches], dim=0)
+        else:
+            combined_batch[key] = batches[0][key]
+    
+    # Process all chunks at once
+    with torch.no_grad():
+        # Use the max duration for generation
+        max_duration = max(durations)
+        result = latent_diffusion.generate_batch(
+            combined_batch,
+            unconditional_guidance_scale=guidance_scale,
+            ddim_steps=ddim_steps,
+            duration=max_duration,
+        )
+    
+    # Split results back into individual waveforms
+    # result shape is (batch_size, 1, samples) or (batch_size, samples)
+    if isinstance(result, np.ndarray):
+        result = torch.from_numpy(result)
+    
+    result = result.squeeze()  # Remove singleton dimensions
+    
+    # If only one sample, add batch dimension back
+    if len(result.shape) == 1:
+        result = result.unsqueeze(0)
+    
+    # Convert to list of numpy arrays, trimmed to original lengths
+    processed_waveforms = []
+    for i, orig_len in enumerate(original_lengths):
+        waveform = result[i].cpu().numpy() if isinstance(result[i], torch.Tensor) else result[i]
+        # Trim to original length
+        if len(waveform) > orig_len:
+            waveform = waveform[:orig_len]
+        processed_waveforms.append(waveform)
+    
+    return processed_waveforms
+
+
 def super_resolution_long_audio(
     latent_diffusion,
     input_file,
