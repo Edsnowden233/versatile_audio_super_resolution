@@ -1,6 +1,9 @@
 # 虚拟环境
 audiosr_env/
 
+# Gradio 缓存
+.gradio/
+
 # Python 缓存
 __pycache__/
 *.py[cod]
