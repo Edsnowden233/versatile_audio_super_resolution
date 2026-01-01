@@ -225,13 +225,14 @@ def warmup_model(audiosr, ddim_steps):
     print("Warming up model (triggering CUDA kernel compilation)...")
     print("="*50)
     
-    # Create a 5.12-second dummy waveform (model's expected chunk duration)
-    dummy_duration = 5.12
+    # Create a 5.0-second dummy waveform (NOT exactly 5.12s to ensure padding logic triggers)
+    # Using 5.0s ensures the internal pad_wav function properly reshapes the array to 2D
+    dummy_duration = 5.0
     dummy_sr = 48000
     dummy_waveform = np.zeros(int(dummy_duration * dummy_sr), dtype=np.float32)
     
-    # Add a tiny bit of noise to avoid potential zero-input edge cases
-    dummy_waveform += np.random.randn(len(dummy_waveform)).astype(np.float32) * 1e-6
+    # Add small noise to create realistic audio signal (avoids numerical edge cases)
+    dummy_waveform += np.random.randn(len(dummy_waveform)).astype(np.float32) * 0.01
     
     # Process dummy chunk to trigger all CUDA kernel compilations
     adjusted_ddim_steps = min(ddim_steps - 2, 998)
