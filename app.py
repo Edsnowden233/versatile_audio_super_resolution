@@ -216,9 +216,45 @@ def convert_audio_for_gradio(audio):
         audio = audio.T
     return audio
 
+def warmup_model(audiosr, ddim_steps):
+    """
+    Warmup the model with a single dummy chunk to trigger CUDA kernel compilation.
+    This prevents memory spikes during actual batch processing.
+    """
+    print("\n" + "="*50)
+    print("Warming up model (triggering CUDA kernel compilation)...")
+    print("="*50)
+    
+    # Create a 5.12-second dummy waveform (model's expected chunk duration)
+    dummy_duration = 5.12
+    dummy_sr = 48000
+    dummy_waveform = np.zeros(int(dummy_duration * dummy_sr), dtype=np.float32)
+    
+    # Add a tiny bit of noise to avoid potential zero-input edge cases
+    dummy_waveform += np.random.randn(len(dummy_waveform)).astype(np.float32) * 1e-6
+    
+    # Process dummy chunk to trigger all CUDA kernel compilations
+    adjusted_ddim_steps = min(ddim_steps - 2, 998)
+    _ = super_resolution_from_waveform(
+        audiosr,
+        dummy_waveform,
+        guidance_scale=2.5,
+        ddim_steps=adjusted_ddim_steps
+    )
+    
+    # Clear GPU cache after warmup
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    
+    print("Warmup complete! Model is ready for batch processing.\n")
+
+
 def inference(audio_file, model_name, guidance_scale, ddim_steps, batch_size):
     # Initialize the model
     audiosr = build_model(model_name=model_name)
+    
+    # Warmup model to trigger CUDA kernel compilation (prevents memory spikes during batch processing)
+    warmup_model(audiosr, ddim_steps)
     
     # Load the audio file with original number of channels
     audio, sr = librosa.load(audio_file, sr=48000, mono=False)
