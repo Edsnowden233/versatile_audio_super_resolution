@@ -38,3 +38,7 @@ Thumbs.db
 dist/
 build/
 *.egg-info/
+
+# 多余文件
+cursor_torchcodec_module_missing.md
+激活环境.txt
