@@ -1,1 +1,0 @@
-.\audiosr_env\Scripts\activate

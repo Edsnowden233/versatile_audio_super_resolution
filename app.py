@@ -50,12 +50,12 @@ def process_chunks_batch(audiosr, chunks, original_lengths, sr, guidance_scale, 
     
     # Use batch processing for true GPU parallelism
     processed_list = super_resolution_batch(
-        audiosr,
+            audiosr,
         chunks,
-        guidance_scale=guidance_scale,
-        ddim_steps=adjusted_ddim_steps
-    )
-    
+            guidance_scale=guidance_scale,
+            ddim_steps=adjusted_ddim_steps
+        )
+        
     # Normalize amplitude for each result
     results = []
     for i, (processed, chunk, orig_len) in enumerate(zip(processed_list, chunks, original_lengths)):
@@ -73,7 +73,7 @@ def process_chunk_direct(audiosr, chunk, original_length, sr, guidance_scale, dd
     Process a single chunk directly without saving to file.
     """
     adjusted_ddim_steps = min(ddim_steps - 2, 998)
-    
+            
     # Process chunk directly (no file I/O)
     processed = super_resolution_from_waveform(
         audiosr,
@@ -89,9 +89,9 @@ def process_chunk_direct(audiosr, chunk, original_length, sr, guidance_scale, dd
     result = np.squeeze(result)
     if len(result) > original_length:
         result = result[:original_length]
+        
+        return result
     
-    return result
-
 
 def process_audio_channel(audiosr, audio_channel, sr, guidance_scale, ddim_steps, batch_size=1):
     """Process a single audio channel with optional batch processing"""
@@ -148,7 +148,7 @@ def process_audio_channel(audiosr, audio_channel, sr, guidance_scale, ddim_steps
             # Clean up GPU memory between batches
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-    else:
+        else:
         # Sequential processing (fallback)
         for i, (chunk, orig_len, (start, end)) in enumerate(zip(all_chunks, all_orig_lens, chunk_positions)):
             print(f"\nChunk {i+1}/{num_chunks}: {start/sr:.2f}s - {end/sr:.2f}s ({(end-start)/sr:.2f}s)")
@@ -157,7 +157,7 @@ def process_audio_channel(audiosr, audio_channel, sr, guidance_scale, ddim_steps
                 audiosr, chunk, orig_len, sr, guidance_scale, ddim_steps
             )
             processed_results.append(result)
-    
+        
     # Apply crossfade and concatenate
     processed_chunks = []
     for i, result in enumerate(processed_results):
